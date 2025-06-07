@@ -1,0 +1,102 @@
+import pyodbc
+import pandas as pd
+
+# 連接 SQL Server 資料庫
+conn = pyodbc.connect(
+    'DRIVER={ODBC Driver 17 for SQL Server};'
+    'SERVER=;'
+    'DATABASE=;'
+    'UID=;'
+    'PWD=;'
+)
+cursor = conn.cursor()
+
+# 使用者輸入股票代碼
+stock_code = input("請輸入股票代碼: ").strip()
+
+# 查詢資料
+cursor.execute("""
+    SELECT [Date], [close], [volume]
+    FROM StockTrading_TA
+    WHERE StockCode = ?
+    ORDER BY [Date] ASC
+""", (stock_code,))
+
+column_names = [column[0] for column in cursor.description]
+rows = [tuple(row) for row in cursor.fetchall()]
+
+# 轉換 DataFrame
+df = pd.DataFrame(rows, columns=column_names)
+
+# 將日期欄位名稱標準化為 'date'
+df.rename(columns={"Date": "date"}, inplace=True)
+
+# 計算 RSI 和 5 日均量
+def add_rsi_and_volume(df, rsi_period=14, ma_volume_period=5):
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+
+    avg_gain = gain.rolling(window=rsi_period).mean()
+    avg_loss = loss.rolling(window=rsi_period).mean()
+
+    rs = avg_gain / avg_loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    df['MA_volume'] = df['volume'].rolling(window=ma_volume_period).mean()
+    return df
+
+df = add_rsi_and_volume(df)
+
+# 計算 Fibonacci 回撤區間
+high = df['close'].max()
+low = df['close'].min()
+diff = high - low
+retracements = {
+    "23.6%": high - 0.236 * diff,
+    "38.2%": high - 0.382 * diff,
+    "50.0%": high - 0.500 * diff,
+    "61.8%": high - 0.618 * diff,
+    "78.6%": high - 0.786 * diff,
+}
+
+# 取高點附近的 retracement 作為賣出參考位
+retracement_high = retracements["23.6%"]
+# 依優先順序排列 retracement 作為買進參考位
+retracement_lows = [retracements["78.6%"], retracements["61.8%"], retracements["50.0%"]]
+
+def detect_trade_signals(df, tolerance=0.015):  # 容忍區間為 ±1.5%
+    buy_signals, sell_signals = [], []
+
+    for i in range(len(df)):
+        price = df.loc[i, 'close']
+        rsi = df.loc[i, 'RSI']
+        volume = df.loc[i, 'volume']
+        ma_vol = df.loc[i, 'MA_volume']
+
+        volume_spike = volume > ma_vol if pd.notna(ma_vol) else False
+
+        # 買進訊號（按 retracement 優先順序，只取第一個符合者）
+        if rsi < 44 and volume_spike:
+            for rl in retracement_lows:
+                if abs(price - rl) / rl <= tolerance:
+                    buy_signals.append((df.loc[i, 'date'], price, rsi, volume))
+                    break
+
+        # 賣出訊號（使用 23.6% 回撤作為參考）
+        if rsi > 65 and volume_spike and abs(price - retracement_high) / retracement_high <= tolerance:
+            sell_signals.append((df.loc[i, 'date'], price, rsi, volume))
+
+    return buy_signals, sell_signals
+
+buy_signals, sell_signals = detect_trade_signals(df)
+
+print("\n【買進訊號】")
+for d, p, r, v in buy_signals:
+    print(f"📈 {d} | 收盤價: {p:.2f} | RSI: {r:.2f} | 成交量: {v:.0f}")
+
+print("\n【賣出訊號】")
+for d, p, r, v in sell_signals:
+    print(f"📉 {d} | 收盤價: {p:.2f} | RSI: {r:.2f} | 成交量: {v:.0f}")
+
+cursor.close()
+conn.close()
