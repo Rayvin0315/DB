@@ -1,2 +1,2 @@
-# DB
-Final
+用StockTrading_TA資料表
+買進的篩選條件有放寬才能判斷買點
